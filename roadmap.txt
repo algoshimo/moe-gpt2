@@ -1,0 +1,4 @@
+1. complete gpt2 arch with out moe for training (can load parameter from huggingface)
+2. complete gpt2 arch with out moe for inference
+3. use MoE instead of MLP
+4. training
