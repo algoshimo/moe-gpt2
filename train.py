@@ -73,7 +73,7 @@ class Block(nn.Module):
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
-
+        return x
 
 class GPT(nn.Module):
 
@@ -92,6 +92,22 @@ class GPT(nn.Module):
         #lm_head是为每一个token对于词表中的所有token都打分，发生在所有encoder_block之后
         #对于训练过程。每一个token都打分选出预测的的token和原本的target计算损失(eg. 对于"我喜欢你": '我'的target是'喜欢', '喜欢'的target是'火锅'， '火锅'的target是<EOF>)
         #对于推理过程，我们只需要关注最后一个token的输出就好了。预测最后一个token的输出，接入之前的输出后继续推理
+
+    def forward(self, idx):
+        B, T = idx.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) 
+        pos_emb = self.transformer.wpe(pos)
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb + pos_emb
+        for block in self.transformer.h:
+            x = block(x)
+        
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+        return logits
+
+        
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -143,5 +159,33 @@ class GPT(nn.Module):
         return model
     
 
+num_return_sequences = 5
+max_length = 30
+
 model = GPT.from_pretrained('gpt2')
-print("scuess!")
+model.eval()
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("hello, i am a language model")
+tokens = torch.tensor(tokens, dtype = torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) #变成好几个相同Prefix的token
+x = tokens.to('cpu')
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits = model(x)
+        logits = logits[:,-1,:]   #logit原本为[B, T, vocab_size]， 现在对于第二维的token只取最后一个token，变为[B, vocab_size]
+        probs = F.softmax(logits, dim=-1)  #dim=-1:在最后一维做softmax
+
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)  #在最后一位取出最大的50个值及其坐标(这个坐标指这个token在词表中的坐标)
+        ix = torch.multinomial(topk_probs, 1)  #按概率分布从每一行采样1个下标(注意不是取最大概率的下标)。 ix : [B, 1]
+        xcol = torch.gather(topk_indices, -1, ix)  #根据采样到的下标从topk_indices中查找到这个token在词表中对应的位置
+        x = torch.cat((x, xcol), dim=1)
+
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
