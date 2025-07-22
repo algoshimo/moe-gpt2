@@ -63,13 +63,14 @@ class MLP(nn.Module):
         return x
 
 class MOE(nn.Module):
-    def __init__(self, config, num_experts=2, top_k=1):
+    def __init__(self, config, num_experts=8, top_k=1):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
         self.hidden_dim = 4 * config.n_embd
         self.experts = nn.ModuleList([MLP(config) for _ in range(num_experts)])
         self.gate = nn.Linear(config.n_embd, num_experts)
+
     
     def forward(self, x):
         #x : [B, T, C]
@@ -95,7 +96,7 @@ class MOE(nn.Module):
                 output_j = self.experts[j](input_j)  #送入第j个专家(mlp)，得出输出
                 gate_j = top_k_gates[indices_j, i].unsqueeze(1)  # 取出这些token在gating对应的权重(softmax的结果)来做加权
                 moe_output[indices_j] += gate_j * output_j
-
+    
         return moe_output.view(B, T, C)
 
 class Block(nn.Module):
