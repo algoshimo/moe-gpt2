@@ -62,17 +62,53 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         return x
 
+class MOE(nn.Module):
+    def __init__(self, config, num_experts=2, top_k=1):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.hidden_dim = 4 * config.n_embd
+        self.experts = nn.ModuleList([MLP(config) for _ in range(num_experts)])
+        self.gate = nn.Linear(config.n_embd, num_experts)
+    
+    def forward(self, x):
+        #x : [B, T, C]
+        B, T, C = x.shape
+        #x_flat : [B*T, C]
+        x_flat = x.reshape(-1, C)
+
+        gate_scores = self.gate(x_flat)
+        top_k_scores, top_k_indices = gate_scores.topk(self.top_k, dim=-1)  #[B*T, top_k]
+
+        top_k_gates = F.softmax(top_k_scores, dim=-1)  # (B*T, top_k)
+
+        # MoE输出初始化
+        moe_output = torch.zeros_like(x_flat)   #(B*T, C)
+
+        for i in range(self.top_k):
+            expert_idx = top_k_indices[:, i]  # (B*T,1)
+            for j in range(self.num_experts):
+                indices_j = (expert_idx == j).nonzero(as_tuple=False).view(-1)  # 在第i个序列(有top_k个序列，每个序列为(B*T,1) ) 中，第j个专家执行哪些token
+                if indices_j.numel() == 0:   #若没有token被分配给第j个专家，直接跳过
+                    continue
+                input_j = x_flat[indices_j]   #所有分配给第j个专家的token的输入向量
+                output_j = self.experts[j](input_j)  #送入第j个专家(mlp)，得出输出
+                gate_j = top_k_gates[indices_j, i].unsqueeze(1)  # 取出这些token在gating对应的权重(softmax的结果)来做加权
+                moe_output[indices_j] += gate_j * output_j
+
+        return moe_output.view(B, T, C)
+
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.moe = MOE(config, num_experts=2)
     
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.moe(self.ln_2(x))
         return x
 
 class GPT(nn.Module):
