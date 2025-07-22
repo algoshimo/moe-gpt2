@@ -1,2 +1,3 @@
 play.ipynb
-.txt
+*.txt
+__pycache__/*

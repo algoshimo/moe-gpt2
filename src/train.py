@@ -6,7 +6,7 @@ from torch.nn import functional as F
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 #input序列最大长度(每个batch输入的最大token数)
+    block_size: int = 1024   #input序列最大长度(每个batch输入的最大token数)
     vocab_size: int = 50257  #词表大小，表示要预测的token种类数
     n_layer: int = 12      #有几个decoder_block
     n_head:int = 12        #多头注意力的头数  
@@ -93,11 +93,24 @@ class GPT(nn.Module):
         #对于训练过程。每一个token都打分选出预测的的token和原本的target计算损失(eg. 对于"我喜欢你": '我'的target是'喜欢', '喜欢'的target是'火锅'， '火锅'的target是<EOF>)
         #对于推理过程，我们只需要关注最后一个token的输出就好了。预测最后一个token的输出，接入之前的输出后继续推理
 
-    def forward(self, idx):
+        #权重共享
+        self.transformer.wte.weight = self.lm_head.weight
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets = None):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device) 
-        pos_emb = self.transformer.wpe(pos)
+        pos_emb = self.transformer.wpe(pos)   
         tok_emb = self.transformer.wte(idx)
         x = tok_emb + pos_emb
         for block in self.transformer.h:
@@ -105,7 +118,11 @@ class GPT(nn.Module):
         
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
-        return logits
+        if(targets == None):
+            loss = targets
+        else :
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
         
 
@@ -157,40 +174,54 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-    
+
+import tiktoken
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+
+        with open('../input.txt', 'r') as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"epoch = {len(self.tokens) // (B * T) } batches")
+
+        self.current_position = 0
+
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T 
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T + 1) > len(self.tokens):
+            self.current_position = 0
+        return x, y
+
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
-print(device)
+model = GPT(GPTConfig())
+model = model.to(device)
 
-num_return_sequences = 5
-max_length = 30
+if __name__ == "__main__":    
+    train_loader = DataLoaderLite(B=4, T=32)
 
-model = GPT.from_pretrained('gpt2')
-model.eval()
-model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr = 3e-4)
+    for i in range(50):
+        x, y = train_loader.next_batch()
+        x = x.to(device)
+        y = y.to(device)
+        torch.no_grad()
+        logits, loss = model(x, y)
+        loss.backward()
+        optimizer.step()
+        print(f"strep {i} : loss : {loss.item()}")
 
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("hello, i am a language model")
-tokens = torch.tensor(tokens, dtype = torch.long)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) #变成好几个相同Prefix的token
-x = tokens.to(device)
-
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1) < max_length:
-    with torch.no_grad():
-        logits = model(x)
-        logits = logits[:,-1,:]   #logit原本为[B, T, vocab_size]， 现在对于第二维的token只取最后一个token，变为[B, vocab_size]
-        probs = F.softmax(logits, dim=-1)  #dim=-1:在最后一维做softmax
-
-        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)  #在最后一位取出最大的50个值及其坐标(这个坐标指这个token在词表中的坐标)
-        ix = torch.multinomial(topk_probs, 1)  #按概率分布从每一行采样1个下标(注意不是取最大概率的下标)。 ix : [B, 1]
-        xcol = torch.gather(topk_indices, -1, ix)  #根据采样到的下标从topk_indices中查找到这个token在词表中对应的位置
-        x = torch.cat((x, xcol), dim=1)
-
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
-    print(">", decoded)
+    import sys; sys = exit(0)
