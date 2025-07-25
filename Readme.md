@@ -4,6 +4,7 @@
 MOE-GPT2 replicates the GPT-2 architecture and replaces the original GPT-2 MLP with a sparse MoE (Mixture of Experts) architecture.
 
 ✨ Features
+======
 ✅ Fully compatible with Hugging Face GPT-2 tokenizer and config
 
 ✅ Drop-in replacement of MLP with sparse MoE
@@ -37,6 +38,6 @@ python src/run.py
 ```
 
 📌 TODO
- Support MoE layer sharing
+======
  Expert dropout and regularization
  Inference-Ready Model Export
